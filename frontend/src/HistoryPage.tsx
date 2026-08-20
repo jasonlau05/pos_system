@@ -1,0 +1,374 @@
+import React, { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { fetchApi } from "@/lib/api";
+import { formatCurrency } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { CustomizationBadges } from "@/components/CustomizationBadges";
+import { useAuth } from "@/contexts/AuthContext";
+import { toast } from "sonner";
+import { ChevronDown, ChevronUp, Loader2, ReceiptText, Search, X } from "lucide-react";
+import { TAX_RATE, calculateTax, calculateTotal, DrinkCustomization } from "@project3/shared";
+
+type ApiOrderItem = {
+  name: string;
+  qty: number | string;
+  price: number | string;
+  customization?: DrinkCustomization;
+};
+
+type ApiOrder = {
+  orderid: number;
+  customerid: number | null;
+  orderdate: string;
+  employeeatcheckout: number | null;
+  paymentmethod: string | null;
+  total_order_price: number | string;
+  items: ApiOrderItem[];
+};
+
+type OrderHistoryData = {
+  orders: ApiOrder[];
+  totalPages: number;
+  currentPage: number;
+};
+
+type Order = {
+  id: number;
+  date: Date;
+  customerId: number | null;
+  employeeId: number | null;
+  paymentMethod: string;
+  items: {
+    name: string;
+    qty: number;
+    unitPrice: number;
+    lineTotal: number;
+    customization?: DrinkCustomization;
+  }[];
+  subtotal: number;
+  tax: number;
+  total: number;
+  itemCount: number;
+};
+
+const PAGE_SIZE = 20;
+
+const parsePgTimestamp = (ts: string) => {
+  const [d, t] = ts.split(" ");
+  if (!d || !t) return new Date(ts);
+  const [y, m, day] = d.split("-").map(Number);
+  const [hh, mm, ss] = t.split(":").map(Number);
+  return new Date(y, (m || 1) - 1, day || 1, hh || 0, mm || 0, ss || 0);
+};
+
+const normalizeOrder = (o: ApiOrder): Order => {
+  const subtotal =
+    typeof o.total_order_price === "string"
+      ? parseFloat(o.total_order_price)
+      : o.total_order_price || 0;
+
+  const items = (o.items ?? []).map((it) => {
+    const qty =
+      typeof it.qty === "string" ? parseInt(it.qty, 10) : Number(it.qty || 0);
+    const lineTotal =
+      typeof it.price === "string" ? parseFloat(it.price) : Number(it.price || 0);
+    const unitPrice = qty > 0 ? lineTotal / qty : 0;
+    return { name: it.name, qty, unitPrice, lineTotal, customization: it.customization };
+  });
+
+  const tax = calculateTax(subtotal);
+  const total = calculateTotal(subtotal);
+  const itemCount = items.reduce((s, i) => s + i.qty, 0);
+
+  return {
+    id: o.orderid,
+    date: parsePgTimestamp(o.orderdate),
+    customerId: o.customerid ?? null,
+    employeeId: o.employeeatcheckout ?? null,
+    paymentMethod: (o.paymentmethod || "unknown").toString(),
+    items,
+    subtotal,
+    tax,
+    total,
+    itemCount,
+  };
+};
+
+export default function HistoryPage() {
+  const { t: translate } = useTranslation();
+  useAuth();
+
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  
+  const [searchId, setSearchId] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
+
+  const hasMore = page < totalPages;
+
+  const load = async (targetPage = 1, searchTerm = "") => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      let endpoint = `/api/order-history?page=${targetPage}&limit=${PAGE_SIZE}`;
+      if (searchTerm.trim()) {
+        endpoint += `&id=${encodeURIComponent(searchTerm.trim())}`;
+      }
+
+      const data = await fetchApi<OrderHistoryData>(endpoint);
+      const normalized = (data.orders ?? []).map(normalizeOrder);
+
+      setOrders((prev) => {
+        const baseList = targetPage === 1 ? [] : prev;
+        const existingIds = new Set(baseList.map(o => o.id));
+        const uniqueIncoming: Order[] = [];
+        
+        for (const item of normalized) {
+          if (!existingIds.has(item.id)) {
+            uniqueIncoming.push(item);
+            existingIds.add(item.id); 
+          }
+        }
+        return [...baseList, ...uniqueIncoming];
+      });
+      setTotalPages(data.totalPages || 1);
+      setIsSearching(!!searchTerm.trim());
+    } catch (e: any) {
+      console.error("Load error:", e);
+      setError(e?.message ?? translate("history.unableToLoad"));
+      toast.error(translate("history.failedToLoad"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load(1, "");
+  }, []);
+
+  const loadMore = async () => {
+    const next = page + 1;
+    setPage(next);
+    await load(next, searchId);
+  };
+
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPage(1);
+    load(1, searchId);
+  };
+
+  const clearSearch = () => {
+    setSearchId("");
+    setPage(1);
+    load(1, "");
+  };
+
+  const toggleExpand = (id: number) =>
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  return (
+    <div className="flex h-full bg-background flex-col overflow-hidden">
+      <div className="border-b bg-white flex-none">
+        <div className="flex h-16 items-center px-6 justify-between gap-4">
+          <div className="flex items-center gap-2 min-w-fit">
+            <ReceiptText className="h-5 w-5" />
+            <h1 className="text-2xl font-bold hidden md:block">{translate("history.title")}</h1>
+            <h1 className="text-xl font-bold md:hidden">{translate("history.titleShort")}</h1>
+          </div>
+
+          <form onSubmit={handleSearch} className="flex-1 max-w-md flex items-center gap-2 ml-auto">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input
+                type="number"
+                placeholder={translate("history.searchPlaceholder")}
+                className="pl-9"
+                value={searchId}
+                onChange={(e) => setSearchId(e.target.value)}
+              />
+              {searchId && (
+                <button
+                  type="button"
+                  onClick={clearSearch}
+                  className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            <Button type="submit" disabled={loading}>
+              {translate("history.search")}
+            </Button>
+          </form>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto p-6 bg-slate-50/50">
+        {loading && page === 1 ? (
+          <div className="flex h-full items-center justify-center text-muted-foreground">
+            <Loader2 className="h-6 w-6 animate-spin mr-2" />
+            {translate("history.loading")}
+          </div>
+        ) : error ? (
+          <div className="flex flex-col items-center justify-center gap-3 text-center h-full">
+            <p className="text-sm text-destructive">{error}</p>
+            <Button variant="outline" onClick={() => load(1, searchId)}>
+              {translate("history.retry")}
+            </Button>
+          </div>
+        ) : orders.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2">
+            <ReceiptText className="h-10 w-10 opacity-20" />
+            <p>
+              {isSearching
+                ? translate("history.noResults", { id: searchId })
+                : translate("history.noData")}
+            </p>
+            {isSearching && (
+              <Button variant="link" onClick={clearSearch}>
+                {translate("history.clearSearch")}
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4 max-w-5xl mx-auto pb-6">
+            {orders.map((o) => {
+              const isOpen = !!expanded[o.id];
+              return (
+                <Card key={o.id} className="overflow-hidden flex-none">
+                  <CardHeader className="p-4 bg-white">
+                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <CardTitle className="text-lg">{translate("history.order")} #{o.id}</CardTitle>
+                          <Badge variant="outline" className="font-normal text-xs">
+                            {o.paymentMethod || "unknown"}
+                          </Badge>
+                        </div>
+                        <div className="text-xs text-muted-foreground mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                          <span>{o.date.toLocaleString()}</span>
+                          <span>•</span>
+                          <span>
+                            {o.itemCount} {o.itemCount === 1 ? translate("history.item") : translate("history.items")}
+                          </span>
+                          <span>•</span>
+                          <span>
+                            {o.customerId && o.customerId !== 0
+                              ? `${translate("history.customer")} #${o.customerId}`
+                              : translate("history.guest")}
+                          </span>
+                          {o.employeeId != null && (
+                            <>
+                              <span>•</span>
+                              <span>{translate("history.cashier")} #{o.employeeId}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-4 sm:text-right">
+                        <div>
+                          <div className="text-xs text-muted-foreground uppercase tracking-wider font-medium">{translate("history.total")}</div>
+                          <div className="text-xl font-bold text-primary">
+                            {formatCurrency(o.total)}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  
+                  <div 
+                    className="px-4 py-2 bg-slate-50 border-t border-b flex justify-center cursor-pointer hover:bg-slate-100 transition-colors"
+                    onClick={() => toggleExpand(o.id)}
+                  >
+                    <div className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                      {isOpen ? (
+                        <>
+                          <ChevronUp className="h-3 w-3" />
+                          {translate("history.hideDetails")}
+                        </>
+                      ) : (
+                        <>
+                          <ChevronDown className="h-3 w-3" />
+                          {translate("history.viewDetails")}
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {isOpen && (
+                    <CardContent className="p-0 bg-slate-50/50 animate-in slide-in-from-top-1 duration-200">
+                      <div className="divide-y border-b">
+                        {o.items.map((it, idx) => (
+                          <div
+                            key={`${o.id}-${idx}`}
+                            className="flex items-center justify-between p-4 hover:bg-white transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="flex items-center justify-center w-8 h-8 rounded-full bg-slate-100 text-xs font-medium text-slate-600">
+                                {it.qty}x
+                              </div>
+                              <div>
+                                <div className="font-medium text-sm">{it.name}</div>
+                                <div className="text-xs text-muted-foreground">
+                                  @ {formatCurrency(it.unitPrice)} {translate("history.each")}
+                                </div>
+                                {it.customization && (
+                                  <CustomizationBadges customization={it.customization} size="sm" />
+                                )}
+                              </div>
+                            </div>
+                            <div className="font-medium text-sm">
+                              {formatCurrency(it.lineTotal)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="p-4 bg-white space-y-1.5">
+                        <div className="flex justify-between text-sm text-muted-foreground">
+                          <span>{translate("history.subtotal")}</span>
+                          <span>{formatCurrency(o.subtotal)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm text-muted-foreground">
+                          <span>{translate("history.tax")} ({(TAX_RATE * 100).toFixed(2)}%)</span>
+                          <span>{formatCurrency(o.tax)}</span>
+                        </div>
+                        <div className="flex justify-between text-base font-bold pt-2 border-t mt-2">
+                          <span>{translate("history.total")}</span>
+                          <span>{formatCurrency(o.total)}</span>
+                        </div>
+                      </div>
+                    </CardContent>
+                  )}
+                </Card>
+              );
+            })}
+
+            {hasMore && (
+              <div className="flex justify-center pt-4 pb-8">
+                <Button variant="secondary" onClick={loadMore} disabled={loading} className="min-w-[150px]">
+                  {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {translate("history.loadMore")}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

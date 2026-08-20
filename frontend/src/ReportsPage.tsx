@@ -1,0 +1,822 @@
+import { useEffect, useState, useCallback } from "react";
+import { useTranslation } from "react-i18next";
+import { fetchApi } from '@/lib/api';
+import { formatCurrency } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { toast } from "sonner";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Separator } from "@/components/ui/separator";
+import { Badge } from "@/components/ui/badge";
+import {
+  FileText,
+  Printer,
+  Calendar,
+  Eye,
+  DollarSign,
+  AlertTriangle,
+  RefreshCw,
+  Lock,
+  History,
+  TrendingUp,
+  CreditCard,
+  Coins,
+  Receipt,
+  Loader2,
+  Clock,
+  RotateCcw
+} from "lucide-react";
+
+// --- TYPES ---
+
+type HourlyTotal = {
+    hour_label: string;
+    count: number;
+    sales: number;
+};
+
+type XReportData = {
+  transactions: number;
+  grossSales: number;
+  netSales: number;
+  cashSales: number;
+  cardSales: number;
+  tax: number;
+  discounts: number;
+  hourlyTotals: HourlyTotal[];
+};
+
+type ZReportHistoryItem = {
+  report_id: number;
+  date_created: string;
+  start_time: string;
+  end_time: string;
+  total_sales: string | number;
+  cash_sales: string | number;
+  card_sales: string | number;
+  tax_total: string | number;
+  variance: string | number;
+  opening_float: string | number;
+  transaction_count: number;
+  counted_cash: string | number;
+  hourlyTotals?: HourlyTotal[]; // Added optional for detail view
+};
+
+const OPENING_FLOAT = 150.00;
+
+export default function ReportsPage() {
+  const { t: translate } = useTranslation();
+  
+  const [activeTab, setActiveTab] = useState("x-report");
+  const [loading, setLoading] = useState(false);
+  
+  // Data States
+  const [xReport, setXReport] = useState<XReportData | null>(null);
+  const [reportLocked, setReportLocked] = useState(false); // New locked state
+  const [history, setHistory] = useState<ZReportHistoryItem[]>([]);
+
+  // Z-Report Form State
+  const [countedCash, setCountedCash] = useState<string>("");
+  const [closeDayOpen, setCloseDayOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // View Details State
+  const [selectedReport, setSelectedReport] = useState<ZReportHistoryItem | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+
+  // --- CALCULATIONS ---
+  const expectedCash = (xReport?.cashSales || 0) + OPENING_FLOAT;
+  const variance = countedCash ? parseFloat(countedCash) - expectedCash : 0;
+
+  // --- HELPER FOR SPLITTING DATA ---
+  const getSplitHourly = (totals: HourlyTotal[]) => {
+      const midPoint = Math.ceil(totals.length / 2);
+      return [totals.slice(0, midPoint), totals.slice(midPoint)];
+  };
+
+  const [xCol1, xCol2] = getSplitHourly(xReport?.hourlyTotals || []);
+
+  // --- API HANDLERS ---
+
+  const loadXReport = useCallback(async () => {
+    setLoading(true);
+    setReportLocked(false);
+    try {
+        const data = await fetchApi<XReportData>('/api/reports/x-report');
+        setXReport(data);
+    } catch (error: any) {
+        if (error.message && error.message.includes("Shift Closed")) {
+            setReportLocked(true);
+            setXReport(null);
+        } else {
+            console.error(error);
+            toast.error(translate("reports.failedToLoad") || "Failed to load X-Report data");
+        }
+    } finally {
+        setLoading(false);
+    }
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await fetchApi<ZReportHistoryItem[]>('/api/reports/history');
+      setHistory(data);
+    } catch (error) {
+      console.error(error);
+      toast.error("Failed to load report history");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleViewReport = async (report: ZReportHistoryItem) => {
+      setSelectedReport(report);
+      setDetailsLoading(true);
+      try {
+          const detailData = await fetchApi<ZReportHistoryItem>(`/api/reports/history/${report.report_id}`);
+          setSelectedReport(detailData);
+      } catch(e) {
+          toast.error("Failed to load hourly details");
+      } finally {
+          setDetailsLoading(false);
+      }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'x-report' || activeTab === 'z-report') {
+      loadXReport();
+    } else if (activeTab === 'history') {
+      loadHistory();
+    }
+  }, [activeTab, loadXReport, loadHistory]);
+
+  const handleRefresh = () => {
+    if (activeTab === 'history') loadHistory();
+    else loadXReport();
+  };
+
+  const handleResetDay = async () => {
+    if (!confirm("Unlock the day? This will delete today's Z-Report.")) return;
+    setLoading(true);
+    try {
+      await fetchApi('/api/reports/reset-day', { method: 'POST' });
+      toast.success("Day unlocked");
+      loadXReport(); // Reload data
+    } catch (error) {
+      toast.error("Failed to unlock day");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCloseDay = async () => {
+    if (!countedCash) return;
+    setIsSubmitting(true);
+    try {
+      await fetchApi('/api/reports/z-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            countedCash: parseFloat(countedCash),
+            openingFloat: OPENING_FLOAT
+        })
+      });
+
+    toast.success(translate("toasts.shiftClosed"));
+      setCloseDayOpen(false);
+      setCountedCash("");
+      setXReport(null);
+      setActiveTab("history");
+    } catch (error: any) {
+      console.error(error);
+    toast.error(error.message || translate("toasts.failedClose"));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  return (
+    <div className="flex h-full bg-background flex-col overflow-hidden">
+      
+      {/* --- PRINT STYLES --- */}
+      <style>{`
+        @media print {
+          body * {
+            visibility: hidden;
+          }
+          .print-section, .print-section * {
+            visibility: visible;
+          }
+          .print-section {
+            position: absolute;
+            left: 0;
+            top: 0;
+            width: 100%;
+            margin: 0;
+            padding: 20px;
+            border: none;
+          }
+          .print-hide {
+            display: none !important;
+          }
+          .fixed {
+            position: absolute;
+          }
+        }
+      `}</style>
+
+      {/* --- HEADER --- */}
+      <div className="border-b bg-white flex-none">
+        <div className="flex h-16 items-center px-6 justify-between gap-4">
+          <div className="flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            <h1 className="text-2xl font-bold">{translate("reports.title")}</h1>
+          </div>
+          <div className="flex items-center gap-3">
+             <Button variant="ghost" size="sm" onClick={handleResetDay} className="text-destructive hover:bg-destructive/10 hidden md:flex">
+                <RotateCcw className="h-4 w-4 mr-2" />
+                {translate("reports.resetDay") || "Reset Day"}
+             </Button>
+
+             <div className="hidden md:flex items-center gap-2 text-sm text-muted-foreground bg-slate-100 px-3 py-1.5 rounded-md">
+                <Calendar className="h-4 w-4" />
+                <span>{new Date().toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</span>
+             </div>
+             <Button variant="outline" size="sm" onClick={handleRefresh} disabled={loading}>
+                <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+                {translate("reports.refreshData")}
+             </Button>
+          </div>
+        </div>
+      </div>
+
+      {/* --- MAIN CONTENT --- */}
+      <div className="flex-1 overflow-auto p-6 bg-slate-50/50">
+        <div className="max-w-6xl mx-auto space-y-6">
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+                <TabsList className="grid w-full grid-cols-3 max-w-[400px] mb-6">
+                    <TabsTrigger value="x-report">{translate("reports.xReport")}</TabsTrigger>
+                    <TabsTrigger value="z-report">{translate("reports.zReport")}</TabsTrigger>
+                    <TabsTrigger value="history">{translate("reports.archives")}</TabsTrigger>
+                </TabsList>
+
+                {/* --- X-REPORT TAB --- */}
+                <TabsContent value="x-report" className="space-y-4">
+                    {loading && !xReport ? (
+                         <div className="flex h-64 items-center justify-center">
+                            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                         </div>
+                    ) : reportLocked ? (
+                         <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed border-slate-300 rounded-lg bg-slate-50">
+                            <Lock className="h-12 w-12 text-slate-400 mb-4" />
+                            <h3 className="text-lg font-semibold text-slate-700">Daily Report Locked</h3>
+                            <p className="text-slate-500 max-w-sm text-center mt-2">
+                                A Z-Report has already been generated for today. The current shift is closed.
+                            </p>
+                            <Button className="mt-6" variant="outline" onClick={() => setActiveTab("history")}>
+                                View Past Reports
+                            </Button>
+                         </div>
+                    ) : (
+                    <>
+                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                            <Card>
+                                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                                    <CardTitle className="text-sm font-medium">{translate("reports.grossSales")}</CardTitle>
+                                    <DollarSign className="h-4 w-4 text-muted-foreground" />
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="text-2xl font-bold">{formatCurrency(xReport?.grossSales || 0)}</div>
+                                    <p className="text-xs text-muted-foreground">{xReport?.transactions || 0} {translate("reports.transactions")}</p>
+                                </CardContent>
+                            </Card>
+                            <Card>
+                                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                                    <CardTitle className="text-sm font-medium">{translate("reports.netSales")}</CardTitle>
+                                    <TrendingUp className="h-4 w-4 text-muted-foreground" />
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="text-2xl font-bold">{formatCurrency(xReport?.netSales || 0)}</div>
+                                    <p className="text-xs text-muted-foreground">{formatCurrency(xReport?.tax || 0)} {translate("reports.tax")}</p>
+                                </CardContent>
+                            </Card>
+                            <Card>
+                                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                                    <CardTitle className="text-sm font-medium">{translate("reports.cardSales")}</CardTitle>
+                                    <CreditCard className="h-4 w-4 text-muted-foreground" />
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="text-2xl font-bold">{formatCurrency(xReport?.cardSales || 0)}</div>
+                                    <p className="text-xs text-muted-foreground">
+                                        {xReport?.grossSales 
+                                            ? Math.round(((xReport.cardSales || 0) / xReport.grossSales) * 100) 
+                                            : 0}% {translate("reports.ofTotal")}
+                                    </p>
+                                </CardContent>
+                            </Card>
+                            <Card>
+                                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                                    <CardTitle className="text-sm font-medium">{translate("reports.cashSales")}</CardTitle>
+                                    <Coins className="h-4 w-4 text-muted-foreground" />
+                                </CardHeader>
+                                <CardContent>
+                                    <div className="text-2xl font-bold">{formatCurrency(xReport?.cashSales || 0)}</div>
+                                    <p className="text-xs text-muted-foreground">
+                                        {xReport?.grossSales 
+                                            ? Math.round(((xReport.cashSales || 0) / xReport.grossSales) * 100) 
+                                            : 0}% {translate("reports.ofTotal")}
+                                    </p>
+                                </CardContent>
+                            </Card>
+                        </div>
+
+                        {/* --- HOURLY BREAKDOWN & PRINTABLE SNAPSHOT --- */}
+                        <div className="grid gap-4 md:grid-cols-2">
+                            <Card className="h-full">
+                                <CardHeader>
+                                    <CardTitle className="flex items-center gap-2">
+                                        <Clock className="h-5 w-5" />
+                                        Hourly Breakdown
+                                    </CardTitle>
+                                    <CardDescription>Sales activity by hour for current shift</CardDescription>
+                                </CardHeader>
+                                <CardContent className="p-0 pb-4">
+                                    {/* 2-Column Split Container */}
+                                    <div className="h-auto grid grid-cols-2 gap-x-1">
+                                        <div className="border-r border-slate-100">
+                                            <Table>
+                                                <TableHeader>
+                                                    <TableRow>
+                                                        <TableHead className="py-2 h-9 text-xs">Time</TableHead>
+                                                        <TableHead className="py-2 h-9 text-xs">#</TableHead>
+                                                        <TableHead className="py-2 h-9 text-xs text-right">Sales</TableHead>
+                                                    </TableRow>
+                                                </TableHeader>
+                                                <TableBody>
+                                                    {xCol1.map((row, idx) => (
+                                                        <TableRow key={`col1-${idx}`}>
+                                                            <TableCell className="py-2 font-medium text-xs">{row.hour_label}</TableCell>
+                                                            <TableCell className="py-2 text-xs">{row.count}</TableCell>
+                                                            <TableCell className="py-2 text-xs text-right font-bold">{formatCurrency(row.sales)}</TableCell>
+                                                        </TableRow>
+                                                    ))}
+                                                    {xCol1.length === 0 && (
+                                                        <TableRow>
+                                                            <TableCell colSpan={3} className="text-center py-4 text-xs text-muted-foreground">No data</TableCell>
+                                                        </TableRow>
+                                                    )}
+                                                </TableBody>
+                                            </Table>
+                                        </div>
+                                        <div>
+                                            <Table>
+                                                <TableHeader>
+                                                    <TableRow>
+                                                        <TableHead className="py-2 h-9 text-xs">Time</TableHead>
+                                                        <TableHead className="py-2 h-9 text-xs">#</TableHead>
+                                                        <TableHead className="py-2 h-9 text-xs text-right">Sales</TableHead>
+                                                    </TableRow>
+                                                </TableHeader>
+                                                <TableBody>
+                                                    {xCol2.map((row, idx) => (
+                                                        <TableRow key={`col2-${idx}`}>
+                                                            <TableCell className="py-2 font-medium text-xs">{row.hour_label}</TableCell>
+                                                            <TableCell className="py-2 text-xs">{row.count}</TableCell>
+                                                            <TableCell className="py-2 text-xs text-right font-bold">{formatCurrency(row.sales)}</TableCell>
+                                                        </TableRow>
+                                                    ))}
+                                                     {xCol2.length === 0 && xCol1.length > 0 && (
+                                                        <TableRow>
+                                                            <TableCell colSpan={3} className="text-center py-4 text-xs text-muted-foreground">-</TableCell>
+                                                        </TableRow>
+                                                    )}
+                                                </TableBody>
+                                            </Table>
+                                        </div>
+                                    </div>
+                                </CardContent>
+                            </Card>
+
+                            {/* --- PRINTABLE SECTION --- */}
+                            <Card className="border-dashed border-2 print-section h-full flex flex-col">
+                                <CardHeader>
+                                    <CardTitle className="flex items-center gap-2">
+                                        <Receipt className="h-5 w-5" />
+                                        {translate("reports.currentShiftSnapshot")}
+                                    </CardTitle>
+                                    <CardDescription>{translate("reports.xReportDesc")}</CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-2 flex-1">
+                                    <div className="bg-white border rounded-md p-6 max-w-md mx-auto shadow-sm font-mono text-sm">
+                                        <div className="text-center font-bold text-lg mb-4">{translate("print.xReport")}</div>
+                                        <div className="flex justify-between py-1 border-b"><span>{translate("print.date")}</span><span>{new Date().toLocaleDateString()}</span></div>
+                                        <div className="flex justify-between py-1 border-b"><span>{translate("print.time")}</span><span>{new Date().toLocaleTimeString()}</span></div>
+                                        
+                                        <div className="py-4 space-y-1">
+                                            <div className="flex justify-between"><span>{translate("print.salesGross")}</span><span>{formatCurrency(xReport?.grossSales || 0)}</span></div>
+                                            <div className="flex justify-between text-muted-foreground"><span>- {translate("print.discounts")}</span><span>{formatCurrency(xReport?.discounts || 0)}</span></div>
+                                            <div className="flex justify-between font-bold pt-2"><span>{translate("print.netSales")}</span><span>{formatCurrency(xReport?.netSales || 0)}</span></div>
+                                            <div className="flex justify-between"><span>{translate("print.plusTax")}</span><span>{formatCurrency(xReport?.tax || 0)}</span></div>
+                                            <div className="flex justify-between font-bold border-t border-black pt-2 mt-2"><span>{translate("print.totalCap")}</span><span>{formatCurrency(xReport?.grossSales || 0)}</span></div>
+                                        </div>
+                                        <div className="py-2 border-t border-dashed">
+                                            <div className="flex justify-between"><span>{translate("print.cashCalc")}</span><span>{formatCurrency(expectedCash)}</span></div>
+                                        </div>
+                                    </div>
+                                </CardContent>
+                                <CardFooter className="justify-end gap-2 bg-slate-50/50 print-hide flex-none">
+                                    <Button variant="outline" onClick={handlePrint}>
+                                        <Printer className="mr-2 h-4 w-4" />
+                                        {translate("reports.print")}
+                                    </Button>
+                                </CardFooter>
+                            </Card>
+                        </div>
+                    </>
+                    )}
+                </TabsContent>
+
+                {/* --- Z-REPORT TAB --- */}
+                <TabsContent value="z-report" className="space-y-4">
+                    {loading ? (
+                         <div className="flex h-64 items-center justify-center">
+                            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                         </div>
+                    ) : reportLocked ? (
+                        <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed border-slate-300 rounded-lg bg-slate-50">
+                            <Lock className="h-12 w-12 text-emerald-600 mb-4" />
+                            <h3 className="text-lg font-semibold text-emerald-700">Day Already Closed</h3>
+                            <p className="text-slate-500 max-w-sm text-center mt-2">
+                                The Z-Report for today has already been finalized.
+                            </p>
+                            <Button className="mt-6" variant="outline" onClick={() => setActiveTab("history")}>
+                                View Archives
+                            </Button>
+                        </div>
+                    ) : (
+                    <div className="grid md:grid-cols-3 gap-6">
+                        <div className="md:col-span-1 space-y-4">
+                            <Card className="bg-slate-900 text-white border-none">
+                                <CardHeader>
+                                    <CardTitle>{translate("reports.closingSummary")}</CardTitle>
+                                    <CardDescription className="text-slate-400">{translate("reports.systemCalculations")}</CardDescription>
+                                </CardHeader>
+                                <CardContent className="space-y-4">
+                                    <div>
+                                        <div className="text-sm text-slate-400">{translate("reports.openingFloat")}</div>
+                                        <div className="text-xl font-bold">{formatCurrency(OPENING_FLOAT)}</div>
+                                    </div>
+                                    <div>
+                                        <div className="text-sm text-slate-400">{translate("reports.cashSales")}</div>
+                                        <div className="text-xl font-bold">{formatCurrency(xReport?.cashSales || 0)}</div>
+                                    </div>
+                                    <Separator className="bg-slate-700" />
+                                    <div>
+                                        <div className="text-sm text-slate-400 uppercase tracking-wider font-bold">{translate("reports.expectedInDrawer")}</div>
+                                        <div className="text-3xl font-bold text-emerald-400">{formatCurrency(expectedCash)}</div>
+                                    </div>
+                                </CardContent>
+                            </Card>
+                        </div>
+                        <Card className="md:col-span-2">
+                            <CardHeader>
+                                <CardTitle className="flex items-center gap-2">
+                                    <Lock className="h-5 w-5 text-amber-500" />
+                                    {translate("reports.reconciliationTitle")}
+                                </CardTitle>
+                                <CardDescription>{translate("reports.reconciliationDesc")}</CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-6">
+                                <div className="grid gap-4">
+                                    <div className="space-y-2">
+                                        <Label htmlFor="countedCash">{translate("reports.totalCashCounted")}</Label>
+                                        <div className="relative">
+                                            <DollarSign className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                                            <Input 
+                                                id="countedCash" 
+                                                placeholder="0.00" 
+                                                className="pl-9 text-lg" 
+                                                value={countedCash}
+                                                onChange={(e) => setCountedCash(e.target.value)}
+                                                type="number"
+                                                min="0"
+                                                step="0.01"
+                                            />
+                                        </div>
+                                    </div>
+                                    {countedCash && (
+                                        <div className={`p-4 rounded-md flex items-center gap-3 border ${Math.abs(variance) < 0.01 ? 'bg-emerald-50 border-emerald-200' : 'bg-red-50 border-red-200'}`}>
+                                            {Math.abs(variance) < 0.01 ? (
+                                                <div className="h-10 w-10 rounded-full bg-emerald-100 flex items-center justify-center flex-shrink-0">
+                                                    <TrendingUp className="h-5 w-5 text-emerald-600" />
+                                                </div>
+                                            ) : (
+                                                <div className="h-10 w-10 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+                                                    <AlertTriangle className="h-5 w-5 text-red-600" />
+                                                </div>
+                                            )}
+                                            <div className="flex-1">
+                                                <div className="text-sm font-medium text-muted-foreground">{translate("reports.variance")}</div>
+                                                <div className={`text-xl font-bold ${Math.abs(variance) < 0.01 ? 'text-emerald-700' : 'text-red-700'}`}>
+                                                    {formatCurrency(variance)}
+                                                </div>
+                                            </div>
+                                            {Math.abs(variance) >= 0.01 && (
+                                                <div className="text-xs text-red-600 font-medium px-2 py-1 bg-white/50 rounded">
+                                                    {translate("reports.actionRequired")}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </CardContent>
+                            <CardFooter className="justify-between bg-slate-50/50 border-t">
+                                <div className="text-xs text-muted-foreground">{translate("reports.actionCannotBeUndone")}</div>
+                                <Button variant="destructive" onClick={() => setCloseDayOpen(true)} disabled={!countedCash || loading}>
+                                    {translate("reports.closeDayButton")}
+                                </Button>
+                            </CardFooter>
+                        </Card>
+                    </div>
+                    )}
+                </TabsContent>
+
+                {/* --- HISTORY TAB (Archives) --- */}
+                <TabsContent value="history">
+                    <Card>
+                        <CardHeader>
+                            <CardTitle className="flex items-center gap-2">
+                                <History className="h-5 w-5" />
+                                {translate("reports.pastReports")}
+                            </CardTitle>
+                            <CardDescription>{translate("reports.pastReportsDesc")}</CardDescription>
+                        </CardHeader>
+                        <CardContent className="p-0">
+                            <Table>
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableHead>{translate("reports.reportDate")}</TableHead>
+                                        <TableHead>{translate("reports.type")}</TableHead>
+                                        <TableHead>{translate("reports.totalSales")}</TableHead>
+                                        <TableHead>{translate("reports.variance")}</TableHead>
+                                        <TableHead className="text-right">{translate("reports.actions")}</TableHead>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {history.map((row) => (
+                                        <TableRow key={row.report_id}>
+                                            <TableCell className="font-medium">
+                                                {new Date(row.date_created).toLocaleString()}
+                                            </TableCell>
+                                            <TableCell>
+                                                <Badge variant="outline">Z-Report</Badge>
+                                            </TableCell>
+                                            <TableCell>{formatCurrency(Number(row.total_sales))}</TableCell>
+                                            <TableCell>
+                                                {Number(row.variance) !== 0 ? (
+                                                    <span className="text-red-500 font-bold">{formatCurrency(Number(row.variance))}</span>
+                                                ) : (
+                                                    <span className="text-emerald-600 font-bold">$0.00</span>
+                                                )}
+                                            </TableCell>
+                                            <TableCell className="text-right">
+                                                <Button variant="ghost" size="sm" onClick={() => handleViewReport(row)}>
+                                                    <Eye className="h-4 w-4" />
+                                                </Button>
+                                            </TableCell>
+                                        </TableRow>
+                                    ))}
+                                    {history.length === 0 && (
+                                        <TableRow>
+                                            <TableCell colSpan={5} className="text-center py-8 text-muted-foreground">
+                                                No history found
+                                            </TableCell>
+                                        </TableRow>
+                                    )}
+                                </TableBody>
+                            </Table>
+                        </CardContent>
+                    </Card>
+                </TabsContent>
+            </Tabs>
+        </div>
+      </div>
+
+      {/* --- CLOSE DAY CONFIRMATION DIALOG --- */}
+      <Dialog open={closeDayOpen} onOpenChange={setCloseDayOpen}>
+        <DialogContent>
+            <DialogHeader>
+                <DialogTitle>{translate("reports.confirmCloseTitle")}</DialogTitle>
+                <DialogDescription>{translate("reports.confirmCloseDesc")}</DialogDescription>
+            </DialogHeader>
+            <div className="py-4 space-y-2">
+                <div className="flex justify-between text-sm">
+                    <span>{translate("reports.expected")}:</span>
+                    <span className="font-bold">{formatCurrency(expectedCash)}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                    <span>{translate("reports.counted")}:</span>
+                    <span className="font-bold">{formatCurrency(parseFloat(countedCash || "0"))}</span>
+                </div>
+                <Separator />
+                <div className={`flex justify-between font-bold text-lg ${Math.abs(variance) >= 0.01 ? 'text-red-500' : 'text-emerald-600'}`}>
+                    <span>{translate("reports.variance")}:</span>
+                    <span>{formatCurrency(variance)}</span>
+                </div>
+            </div>
+            <DialogFooter>
+                <Button variant="outline" onClick={() => setCloseDayOpen(false)}>{translate("reports.cancel")}</Button>
+                <Button variant="destructive" onClick={handleCloseDay} disabled={isSubmitting}>
+                    {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin mr-2"/> : null}
+                    {translate("reports.finalizeReport")}
+                </Button>
+            </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* --- HISTORY DETAILS DIALOG (Updated to match Screenshot) --- */}
+      <Dialog open={!!selectedReport} onOpenChange={(open) => !open && setSelectedReport(null)}>
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] overflow-y-auto">
+            <DialogHeader className="pb-4">
+                <div className="text-xl font-bold">Z-Report #{selectedReport?.report_id}</div>
+                <div className="text-sm text-muted-foreground">
+                    {new Date(selectedReport?.date_created || "").toLocaleString()}
+                </div>
+            </DialogHeader>
+            
+            {selectedReport && (
+                <div className="space-y-6">
+                    {/* Summary Section - EXACT SCREENSHOT LAYOUT */}
+                    <div className="bg-white border rounded-lg p-6 shadow-sm">
+                        {/* Top Row: Transactions + Total Sales */}
+                        <div className="flex justify-between items-end mb-6">
+                            <div>
+                                <div className="text-sm text-muted-foreground mb-1">Transactions</div>
+                                <div className="text-3xl font-bold">{selectedReport.transaction_count}</div>
+                            </div>
+                            <div className="text-right">
+                                <div className="text-sm text-muted-foreground mb-1">Total Sales</div>
+                                <div className="text-3xl font-bold">{formatCurrency(Number(selectedReport.total_sales))}</div>
+                            </div>
+                        </div>
+
+                        <Separator className="my-4" />
+
+                        {/* List View for Sales Breakdown */}
+                        <div className="space-y-3">
+                            <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Cash Sales</span>
+                                <span className="font-medium">{formatCurrency(Number(selectedReport.cash_sales))}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Card Sales</span>
+                                <span className="font-medium">{formatCurrency(Number(selectedReport.card_sales))}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Tax Collected</span>
+                                <span className="font-medium">{formatCurrency(Number(selectedReport.tax_total))}</span>
+                            </div>
+                        </div>
+
+                        <Separator className="my-4" />
+
+                        {/* List View for Reconciliation */}
+                        <div className="space-y-3">
+                            <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Opening Float</span>
+                                <span className="font-medium">{formatCurrency(Number(selectedReport.opening_float))}</span>
+                            </div>
+                            <div className="flex justify-between text-sm">
+                                <span className="text-muted-foreground">Counted Cash</span>
+                                <span className="font-medium">{formatCurrency(Number(selectedReport.counted_cash))}</span>
+                            </div>
+                            <div className="flex justify-between items-center pt-1">
+                                <span className="font-bold text-base">Variance</span>
+                                <span className={`font-bold text-base ${Number(selectedReport.variance) !== 0 ? "text-red-600" : "text-emerald-600"}`}>
+                                    {formatCurrency(Number(selectedReport.variance))}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Hourly Details Section - 2 COLUMN LAYOUT */}
+                    <div className="border rounded-md mt-6">
+                        <div className="bg-slate-100 px-4 py-2 border-b">
+                            <h4 className="font-semibold text-sm">Hourly Breakdown</h4>
+                        </div>
+                        <div className="p-0">
+                            {detailsLoading ? (
+                                <div className="p-8 flex justify-center"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground"/></div>
+                            ) : selectedReport.hourlyTotals ? (
+                                (() => {
+                                    // Split logic inside render for the dialog
+                                    const totals = selectedReport.hourlyTotals || [];
+                                    const mid = Math.ceil(totals.length / 2);
+                                    const leftCol = totals.slice(0, mid);
+                                    const rightCol = totals.slice(mid);
+
+                                    return (
+                                        <div className="grid grid-cols-2 gap-x-1">
+                                            {/* Left Column */}
+                                            <div className="border-r border-slate-100">
+                                                <Table>
+                                                    <TableHeader>
+                                                        <TableRow>
+                                                            <TableHead className="h-8 text-xs">Hour</TableHead>
+                                                            <TableHead className="h-8 text-xs text-center">#</TableHead>
+                                                            <TableHead className="h-8 text-xs text-right">Sales</TableHead>
+                                                        </TableRow>
+                                                    </TableHeader>
+                                                    <TableBody>
+                                                        {leftCol.map((row, i) => (
+                                                            <TableRow key={`l-${i}`} className="h-8">
+                                                                <TableCell className="py-1 text-xs font-medium">{row.hour_label}</TableCell>
+                                                                <TableCell className="py-1 text-xs text-center">{row.count}</TableCell>
+                                                                <TableCell className="py-1 text-xs text-right font-mono">{formatCurrency(row.sales)}</TableCell>
+                                                            </TableRow>
+                                                        ))}
+                                                        {leftCol.length === 0 && (
+                                                            <TableRow>
+                                                                <TableCell colSpan={3} className="text-center text-xs text-muted-foreground py-4">No data</TableCell>
+                                                            </TableRow>
+                                                        )}
+                                                    </TableBody>
+                                                </Table>
+                                            </div>
+
+                                            {/* Right Column */}
+                                            <div>
+                                                <Table>
+                                                    <TableHeader>
+                                                        <TableRow>
+                                                            <TableHead className="h-8 text-xs">Hour</TableHead>
+                                                            <TableHead className="h-8 text-xs text-center">#</TableHead>
+                                                            <TableHead className="h-8 text-xs text-right">Sales</TableHead>
+                                                        </TableRow>
+                                                    </TableHeader>
+                                                    <TableBody>
+                                                        {rightCol.map((row, i) => (
+                                                            <TableRow key={`r-${i}`} className="h-8">
+                                                                <TableCell className="py-1 text-xs font-medium">{row.hour_label}</TableCell>
+                                                                <TableCell className="py-1 text-xs text-center">{row.count}</TableCell>
+                                                                <TableCell className="py-1 text-xs text-right font-mono">{formatCurrency(row.sales)}</TableCell>
+                                                            </TableRow>
+                                                        ))}
+                                                        {rightCol.length === 0 && leftCol.length > 0 && (
+                                                            <TableRow>
+                                                                <TableCell colSpan={3} className="text-center text-xs text-muted-foreground py-4">-</TableCell>
+                                                            </TableRow>
+                                                        )}
+                                                    </TableBody>
+                                                </Table>
+                                            </div>
+                                        </div>
+                                    );
+                                })()
+                            ) : (
+                                <div className="p-4 text-center text-xs text-muted-foreground">No details loaded</div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <DialogFooter className="mt-4">
+                <Button variant="outline" onClick={() => setSelectedReport(null)}>Close</Button>
+            </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+    </div>
+  );
+}
